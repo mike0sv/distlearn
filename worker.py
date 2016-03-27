@@ -1,12 +1,13 @@
 from __future__ import print_function, with_statement, division
 import Pyro4
+import sys
 __author__ = 'Mike'
 import matplotlib.pyplot as plt
 Pyro4.config.SERIALIZER = 'pickle'
 Pyro4.config.SERIALIZERS_ACCEPTED.add('pickle')
 
 def main():
-    uri = 'PYRO:dispatcher@localhost:5555'
+    uri = 'PYRO:dispatcher@%s:5555' % sys.argv[1]
     proxy = Pyro4.core.Proxy(uri)
     X, Y = proxy.gimme_data()
     reg = proxy.gimme()
