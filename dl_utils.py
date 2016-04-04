@@ -47,11 +47,15 @@ class MasterWrapper:
                 self.logger.info("Connection restored")
 
 class Task:
-    def __init__(self, clf, data):
-        self.clf = clf
+    def __init__(self, type, data, **kwargs):
+        self.id = -1#random.randint(0, 2 ** 31)
         self.data = data
-        self.id = random.randint(0, 2 ** 31)
+        self.type = type
         self.owner = None
+        self.params = kwargs
+
+    def __getitem__(self, item):
+        return self.params[item]
 
     def __repr__(self):
         return '<Task id=%d, owner=%s>' % (self.id, self.owner)

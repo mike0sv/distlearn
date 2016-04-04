@@ -42,24 +42,87 @@ class WorkerProxy:
         self.master = MasterWrapper("PYRO:master@" + addr, name, logger)
         self.master.worker_register(name)
         self.heartbeat_timer = Heartbeat(self.master.proxy, .5)
+        self.datasets = dict()
+        self.id = name
+
+    def check_data(self, client_id, task_id, name):
+        if name in self.datasets:
+            return True
+        data = self.master.worker_get_data(name)
+        if data is not None:
+            self.datasets[name] = data
+            return True
+        else:
+            self.master.worker_put_error(client_id, task_id, self.id,'Cannot load data %s' % name)
+            return False
+
+    def fit(self, task):
+        data = self.datasets[task.data]
+        train = data['data']
+        target = data['target']
+        if 'train' in task.params:
+            train = train[task['train']]
+            target = target[task['train']]
+        clf = task['clf']
+        clf.fit(train, target)
+        self.master.worker_put_result(task.owner, task.id, clf)
+
+    def fit_predict(self, task):
+        data = self.datasets[task.data]
+        train = data['data']
+        target = data['target']
+        if 'train' in task.params:
+            train = train[task['train']]
+            target = target[task['train']]
+        clf = task['clf']
+        clf.fit(train, target)
+        test_data = data
+        if 'test_data' in task.params:
+            test_data = task['test_data']
+
+        test = test_data['data']
+        if 'test' in task.params:
+            test = test[task['test']]
+
+        if task['proba']:
+            pred = clf.predict_proba(test)
+        else:
+            pred = clf.predict(test)
+
+        if task['result'] == 'pred':
+            self.master.worker_put_result(task.owner, task.id, pred)
+        elif task['result'] == 'score':
+            test_target = test_data['target']
+            if 'test' in task.params:
+                test_target = test_target[task['test']]
+            score = task['scoring'](test_target, pred)
+            self.master.worker_put_result(task.owner, task.id, score)
 
     def event_loop(self):
         try:
             while True:
-                logger.debug("Acquiring work")
-                work = self.master.worker_get_work()
-                if work is None:
-                    logger.debug("No work available yet")
-                    time.sleep(5)
-                else:
-                    logger.info('Got %s' % work)
-                    X, Y = work.data
-                    work.clf.fit(X, Y)
-                    logger.info("Returning result")
-                    import temp
-                    print(temp.getsize(work.clf))
-                    self.master.worker_put_result(work.id, work.clf)
-                    logger.info('Done')
+                try:
+                    logger.debug("Acquiring task")
+                    task = self.master.worker_get_work()
+                    if task is None:
+                        logger.debug("No tasks available yet")
+                        time.sleep(5)
+                    else:
+                        logger.info('Got %s' % task)
+                        client_id, task_id = task.owner, task.id
+                        if not self.check_data(client_id, task_id, task.data):
+                            continue
+                        if 'test_data' in task.params and not self.check_data(client_id, task_id, task['test_data']):
+                            continue
+
+                        if task.type == 'fit_predict':
+                            self.fit_predict(task)
+                        elif task.type == 'fit':
+                            self.fit(task)
+
+                        logger.info('Done')
+                except Exception as e:
+                    logger.error(e.message)
         except Exception:
             raise
 
