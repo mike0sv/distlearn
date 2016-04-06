@@ -1,7 +1,9 @@
-__author__ = 'Mike'
 import threading
+
 import Pyro4
-import random
+
+__author__ = 'Mike'
+
 
 class RepeatedTimer(threading.Thread):
     def __init__(self, interval, func, *args, **kwargs):
@@ -15,6 +17,7 @@ class RepeatedTimer(threading.Thread):
 
     def pause(self):
         self.paused = True
+
     def resume(self):
         self.paused = False
 
@@ -26,6 +29,8 @@ class RepeatedTimer(threading.Thread):
     def stop(self):
         self._stop.set()
 
+
+# noinspection PyProtectedMember
 class MasterWrapper:
     def __init__(self, uri, name, logger):
         self.proxy = None
@@ -33,7 +38,7 @@ class MasterWrapper:
         self.logger = logger
         try:
             self.proxy = Pyro4.core.Proxy(uri)
-        except Pyro4.errors.CommunicationError, Pyro4.errors.ConnectionClosedError:
+        except (Pyro4.errors.CommunicationError, Pyro4.errors.ConnectionClosedError):
             self.proxy._pyroReconnect()
         logger.info("Connected to master")
 
@@ -41,14 +46,15 @@ class MasterWrapper:
         while True:
             try:
                 return self.proxy.__getattr__(item)
-            except Pyro4.errors.CommunicationError, Pyro4.errors.ConnectionClosedError:
+            except (Pyro4.errors.CommunicationError, Pyro4.errors.ConnectionClosedError):
                 self.logger.warn("Connection lost, retrying")
                 self.proxy._pyroReconnect()
                 self.logger.info("Connection restored")
 
+
 class Task:
     def __init__(self, type, data, **kwargs):
-        self.id = -1#random.randint(0, 2 ** 31)
+        self.id = -1  # random.randint(0, 2 ** 31)
         self.data = data
         self.type = type
         self.owner = None

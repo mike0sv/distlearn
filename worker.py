@@ -1,18 +1,18 @@
 from __future__ import print_function, with_statement, division
-import Pyro4
-import sys
+
+import logging
 import os
 import socket
-import logging
+import sys
 import time
-import Queue as queue
-import matplotlib.pyplot as plt
-__author__ = 'Mike'
+import traceback as tb
 from dl_utils import *
+
+__author__ = 'Mike'
 
 Pyro4.config.SERIALIZER = 'pickle'
 Pyro4.config.SERIALIZERS_ACCEPTED.add('pickle')
-#Pyro4.config.COMMTIMEOUT = 1
+# Pyro4.config.COMMTIMEOUT = 1
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -22,24 +22,27 @@ logger.addHandler(log_handler)
 
 WORKERNAME = "Worker_%d@%s" % (os.getpid(), socket.gethostname())
 
-class Heartbeat():
+
+# noinspection PyProtectedMember
+class Heartbeat:
     def __init__(self, master, interval):
-            self.master = Pyro4.core.Proxy(master._pyroUri)
-            self.timer = RepeatedTimer(interval, self.send)
-            self.timer.start()
+        self.master = Pyro4.core.Proxy(master._pyroUri)
+        self.timer = RepeatedTimer(interval, self.send)
+        self.timer.start()
+
     def send(self):
         try:
             self.master.worker_send_heartbeat(WORKERNAME)
-        except:
+        except Exception:
             self.timer.pause()
             self.master._pyroReconnect()
             self.timer.resume()
 
 
 class WorkerProxy:
-    def __init__(self, name, addr):
+    def __init__(self, name, host, port):
         logger.info("This is worker %s" % name)
-        self.master = MasterWrapper("PYRO:master@" + addr, name, logger)
+        self.master = MasterWrapper("PYRO:master@%s:%d" % (host, port), name, logger)
         self.master.worker_register(name)
         self.heartbeat_timer = Heartbeat(self.master.proxy, .5)
         self.datasets = dict()
@@ -53,7 +56,7 @@ class WorkerProxy:
             self.datasets[name] = data
             return True
         else:
-            self.master.worker_put_error(client_id, task_id, self.id,'Cannot load data %s' % name)
+            self.master.worker_put_error(client_id, task_id, self.id, 'Cannot load data %s' % name)
             return False
 
     def fit(self, task):
@@ -122,13 +125,15 @@ class WorkerProxy:
 
                         logger.info('Done')
                 except Exception as e:
-                    logger.error(e.message)
+                    logger.error("This shitty log " + e.message)
+                    raise
         except Exception:
-            raise
+            pass
 
     def __enter__(self):
         return self
 
+    # noinspection PyUnusedLocal
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.heartbeat_timer.timer.stop()
 
@@ -137,9 +142,7 @@ class WorkerProxy:
 
 
 def main():
-    uri = '%s:%d' % (sys.argv[1], 5555)
-    #proxy = Pyro4.core.Proxy(uri)
-    with WorkerProxy(WORKERNAME, uri) as worker:
+    with WorkerProxy(WORKERNAME, sys.argv[1], 5555) as worker:
         worker.event_loop()
     logger.info('Exiting')
 
