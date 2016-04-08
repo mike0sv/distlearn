@@ -10,8 +10,11 @@ from dl_utils import *
 
 __author__ = 'Mike'
 
+
 Pyro4.config.SERIALIZER = 'pickle'
 Pyro4.config.SERIALIZERS_ACCEPTED.add('pickle')
+Pyro4.config.PICKLE_PROTOCOL_VERSION = 2
+
 # Pyro4.config.COMMTIMEOUT = 1
 
 logger = logging.getLogger(__name__)
@@ -128,16 +131,18 @@ class WorkerProxy:
                     logger.error("This shitty log " + e.message)
                     raise
         except Exception:
-            pass
+            raise
 
     def __enter__(self):
         return self
 
     # noinspection PyUnusedLocal
     def __exit__(self, exc_type, exc_val, exc_tb):
+        print('__exit__')
         self.heartbeat_timer.timer.stop()
 
     def close(self):
+        print('__close__')
         self.heartbeat_timer.timer.stop()
 
 

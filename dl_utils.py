@@ -46,7 +46,8 @@ class MasterWrapper:
         while True:
             try:
                 return self.proxy.__getattr__(item)
-            except (Pyro4.errors.CommunicationError, Pyro4.errors.ConnectionClosedError):
+            except (Pyro4.errors.CommunicationError, Pyro4.errors.ConnectionClosedError) as e:
+                print(e)
                 self.logger.warn("Connection lost, retrying")
                 self.proxy._pyroReconnect()
                 self.logger.info("Connection restored")

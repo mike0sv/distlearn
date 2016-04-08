@@ -14,8 +14,8 @@ except ImportError:
     import queue
 __author__ = 'Mike'
 
-dl_utils.Pyro4.config.SERIALIZER = 'pickle'
-dl_utils.Pyro4.config.SERIALIZERS_ACCEPTED.add('pickle')
+#dl_utils.Pyro4.config.SERIALIZER = 'pickle'
+#dl_utils.Pyro4.config.SERIALIZERS_ACCEPTED.add('pickle')
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)

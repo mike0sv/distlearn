@@ -36,7 +36,7 @@ def main():
     print('Sending data')
     dc.send_data('bnp', {'data': data.as_matrix(), 'target': target})
     print('Cross val')
-    clf = ExtraTreesClassifier(n_estimators=1000, max_features=60, criterion='entropy', min_samples_split=4,
+    clf = ExtraTreesClassifier(n_estimators=10, max_features=60, criterion='entropy', min_samples_split=4,
                                max_depth=40, min_samples_leaf=2, n_jobs=-1)
     #clf.fit(data, target)
     scores = []
