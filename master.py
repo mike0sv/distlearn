@@ -112,9 +112,9 @@ class Master:
                 task.id = client.next_task_id
                 client.next_task_id += 1
                 if task.type == 'cv':
-                    if any(map(lambda x: x not in task.params, ['cv', 'clf', 'scoring'])):
-                        raise AttributeError('Missing parameter; cv, clf, scoring are needed')
-                    cv, clf, scoring = task['cv'], task['clf'], task['scoring']
+                    if any(map(lambda x: x not in task.params, ['cv', 'estimator', 'scoring'])):
+                        raise AttributeError('Missing parameter; cv, estimator, scoring are needed')
+                    cv, estimator, scoring = task['cv'], task['estimator'], task['scoring']
                     proba = 'proba' in task.params and task.params['proba']
                     client.task_dependencies[task.id] = TaskDependency(task.id, 'list')
                     tasks = list()
@@ -122,7 +122,7 @@ class Master:
                         task_id = client.next_task_id #TODO
                         client.next_task_id += 1
                         cv_task = dl_utils.Task(type='fit_predict', data=task.data, result='score', scoring=scoring,
-                                                clf=clf, proba=proba, train=train, test=test)
+                                                estimator=estimator, proba=proba, train=train, test=test)
                         cv_task.owner = task.owner
                         cv_task.id = task_id
                         client.task_dependencies[task.id].deps.append(task_id)

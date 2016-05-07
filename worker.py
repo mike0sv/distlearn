@@ -5,7 +5,7 @@ import os
 import socket
 import sys
 import time
-import traceback as tb
+from sklearn.utils import safe_indexing
 from dl_utils import *
 
 __author__ = 'Mike'
@@ -67,40 +67,47 @@ class WorkerProxy:
         train = data['data']
         target = data['target']
         if 'train' in task.params:
-            train = train[task['train']]
-            target = target[task['train']]
-        clf = task['clf']
-        clf.fit(train, target)
-        self.master.worker_put_result(task.owner, task.id, clf)
+            #train = train[task['train']]
+            #target = target[task['train']]
+            train = safe_indexing(train, task['train'])
+            target = safe_indexing(target, task['train'])
+        estimator = task['estimator']
+        estimator.fit(train, target)
+        self.master.worker_put_result(task.owner, task.id, estimator)
 
     def fit_predict(self, task):
         data = self.datasets[task.data]
         train = data['data']
         target = data['target']
         if 'train' in task.params:
-            train = train[task['train']]
-            target = target[task['train']]
-        clf = task['clf']
-        clf.fit(train, target)
+            #train = train[task['train']]
+            #target = target[task['train']]
+            train = safe_indexing(train, task['train'])
+            target = safe_indexing(target, task['train'])
+        estimator = task['estimator']
+        estimator.fit(train, target)
+
         test_data = data
         if 'test_data' in task.params:
             test_data = task['test_data']
 
         test = test_data['data']
         if 'test' in task.params:
-            test = test[task['test']]
+            #test = test[task['test']]
+            test = safe_indexing(test, task['test'])
 
         if task['proba']:
-            pred = clf.predict_proba(test)
+            pred = estimator.predict_proba(test)
         else:
-            pred = clf.predict(test)
+            pred = estimator.predict(test)
 
         if task['result'] == 'pred':
             self.master.worker_put_result(task.owner, task.id, pred)
         elif task['result'] == 'score':
             test_target = test_data['target']
             if 'test' in task.params:
-                test_target = test_target[task['test']]
+                #test_target = test_target[task['test']]
+                test_target = safe_indexing(test_target, task['test'])
             score = task['scoring'](test_target, pred)
             self.master.worker_put_result(task.owner, task.id, score)
 

@@ -37,8 +37,8 @@ class Client:
     def send_data(self, data_name, data):
         self.master.client_put_data(data_name, data)
 
-    def cross_validate(self, data, clf, scoring, cv, async=True):
-        task = Task(data=data, clf=clf, scoring=scoring, cv=cv, type='cv')
+    def cross_validate(self, data, estimator, scoring, cv, async=True):
+        task = Task(data=data, estimator=estimator, scoring=scoring, cv=cv, type='cv')
         task.owner = self.id
         task.id = self.master.client_put_task(task)
         if async:
@@ -63,8 +63,10 @@ def test1(client):
     dataY = dataY.reshape((1000, 1))
     client.send_data('data1', {'data': dataX, 'target': dataY})
 
-    id1 = client.send_task(Task(type='fit', data='data1', clf=RandomForestRegressor(n_estimators=1000, max_depth=1)))
-    id2 = client.send_task(Task(type='fit', data='data1', clf=RandomForestRegressor(n_estimators=1000, max_depth=100)))
+    id1 = client.send_task(Task(type='fit', data='data1',
+                                estimator=RandomForestRegressor(n_estimators=1000, max_depth=1)))
+    id2 = client.send_task(Task(type='fit', data='data1',
+                                estimator=RandomForestRegressor(n_estimators=1000, max_depth=100)))
     res1 = client.collect_task(id1)
     res2 = client.collect_task(id2)
     print('done')

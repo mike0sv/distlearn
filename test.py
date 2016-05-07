@@ -5,7 +5,7 @@ import logging
 import time
 
 import pandas as pd
-from sklearn.cross_validation import StratifiedKFold
+from sklearn.cross_validation import StratifiedKFold, cross_val_score
 from sklearn.ensemble import ExtraTreesClassifier
 from sklearn.metrics import log_loss
 
