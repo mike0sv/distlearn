@@ -1,9 +1,13 @@
 from __future__ import print_function, with_statement, division
-from future.utils import iteritems
-import time
+
 import logging
 import sys
+import time
 from threading import Lock
+
+import numpy as np
+from future.utils import iteritems
+
 import dl_utils
 
 try:
@@ -14,8 +18,8 @@ except ImportError:
     import queue
 __author__ = 'Mike'
 
-#dl_utils.Pyro4.config.SERIALIZER = 'pickle'
-#dl_utils.Pyro4.config.SERIALIZERS_ACCEPTED.add('pickle')
+dl_utils.Pyro4.config.SERIALIZER = 'pickle'
+dl_utils.Pyro4.config.SERIALIZERS_ACCEPTED.add('pickle')
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -37,20 +41,61 @@ class Master:
         self.clients = dict()
         self.lock_clients = Lock()
         self.datasets = dict()
+        self.aggs = {'list': self._aggregate_tasks_list, 'hstack': self._aggregate_tasks_hstack,
+                     'stacking': self._aggregate_tasks_stacking}
 
-    def _aggregate_tasks_list(self, client, task_id, deps):
+    def _aggregate_tasks_list(self, client, task_id, dep):
         # type: (Client, int, TaskDependency) -> None
-        results = [client.results[child_id] for child_id in deps]
+        results = [client.results[child_id] for child_id in dep.deps]
         client.results[task_id] = results
+
+    def _aggregate_tasks_hstack(self, client, task_id, dep):
+        results = [client.results[child_id] for child_id in dep.deps]
+        client.results[task_id] = np.hstack(results)
+
+    def _aggregate_tasks_stacking(self, client, task_id, dep):
+        if 'p3' not in dep.descr:
+            try:
+                client.lock.acquire()
+                fold_est_dict = dict(zip(dep.descr, map(lambda x: client.results[x], dep.deps)))
+                est_count = len([0 for d in dep.descr if d.startswith('p2')])
+                folds_count = int(len([0 for d in dep.descr if d.startswith('p1')]) / est_count)
+                #print(est_count, folds_count)
+                #print(fold_est_dict['p1_f0_e0'].shape, fold_est_dict['p2_e0'].shape)
+                p3_train = np.vstack([np.vstack([fold_est_dict['p1_f%d_e%d' % (fold, n)] for n in range(est_count)]).T
+                                      for fold in range(folds_count)])
+                p3_test = np.vstack([fold_est_dict['p2_e%d' % n] for n in range(est_count)]).T
+                p3_task_id = client.get_task_id()
+                data = {'data': p3_train, 'target': self.datasets[dep.args['data']]['target']}
+                test_data = {'data': p3_test}
+                #print(data['data'].shape, data['target'].shape, p3_test.shape)
+                estimator = dep.args['estimator']
+                proba = dep.args['proba']
+                result = dep.args['result']
+                p3_task = dl_utils.Task(type='fit_predict', result=result, data=data, test_data=test_data,
+                                        estimator=estimator, proba=proba)
+                p3_task.owner = client.id
+                p3_task.id = p3_task_id
+                client.task_dependencies[task_id].deps.append(p3_task_id)
+                client.task_dependencies[task_id].descr.append('p3')
+                self.work_queue.queue.append(p3_task)
+            finally:
+                client.lock.release()
+            return False
+        else:
+            fold_est_dict = dict(zip(dep.descr, map(lambda x: client.results[x], dep.deps)))
+            client.results[task_id] = fold_est_dict['p3']
+            return True
 
     def _aggregate_tasks(self):
         for client in self.clients.values():
             done = list()
             for parent, dep in iteritems(client.task_dependencies):
+                #print(zip(dep.descr, map(lambda x: x in client.results, dep.deps)))
                 if all(map(lambda x: x in client.results, dep.deps)):
-                    if dep.agg == 'list':
-                        self._aggregate_tasks_list(client, parent, dep.deps)
-                    done.append(parent)
+                    agg = self.aggs[dep.agg](client, parent, dep)
+                    if agg is None or agg:
+                        done.append(parent)
             map(client.task_dependencies.pop, done)
 
     def _check_heartbeat(self):
@@ -104,34 +149,79 @@ class Master:
         except Exception as e:
             print(e.message)
 
+    def _check_params(self, task, params):
+        if any(map(lambda x: x not in task.params, params)):
+            raise AttributeError('Missing parameter; %s are needed' % ', '.join(params))
+
+    def _cv_task(self, task):
+        client = self.clients[task.owner]
+        self._check_params(task, ['cv', 'estimator', 'scoring'])
+        cv, estimator, scoring = task['cv'], task['estimator'], task['scoring']
+        proba = 'proba' in task.params and task.params['proba']
+        result = 'score' if 'result' not in task.params else task['result']
+        agg_type = 'list' if result == 'score' else 'hstack'
+        client.task_dependencies[task.id] = TaskDependency(task.id, agg_type)
+        tasks = list()
+        for train, test in cv:
+            task_id = client.get_task_id()
+            cv_task = dl_utils.Task(type='fit_predict', data=task.data, result=result, scoring=scoring,
+                                    estimator=estimator, proba=proba, train=train, test=test)
+            cv_task.owner = task.owner
+            cv_task.id = task_id
+            client.task_dependencies[task.id].deps.append(task_id)
+            tasks.append(cv_task)
+        map(self.work_queue.queue.append, tasks)
+        return task.id
+
+    def _stacking_task(self, task):
+        client = self.clients[task.owner]
+        self._check_params(task, ['cv', 'estimators', 'estimator'])
+
+        cv, estimators, estimator = task['cv'], task['estimators'], task['estimator']
+        proba = 'proba' in task.params and task.params['proba']
+        result = 'pred' if 'result' not in task.params else task['result']
+        client.task_dependencies[task.id] = TaskDependency(task.id, 'stacking', estimator=estimator,
+                                                           proba=proba, data=task.data, result=result)
+        tasks = list()
+        for fold, (train, test) in enumerate(cv):
+            for n, est in enumerate(estimators):
+                task_id = client.get_task_id()
+                cv_task = dl_utils.Task(type='fit_predict', result='pred', data=task.data,
+                                        estimator=est, proba=proba, train=train, test=test)
+                cv_task.owner = task.owner
+                cv_task.id = task_id
+                client.task_dependencies[task.id].deps.append(task_id)
+                client.task_dependencies[task.id].descr.append('p1_f%d_e%d' % (fold, n))
+                tasks.append(cv_task)
+
+        for n, est in enumerate(estimators):
+            task_id = client.get_task_id()
+            p2_task = dl_utils.Task(type='fit_predict', result='pred', data=task.data,
+                                    estimator=est, proba=proba)
+            p2_task.owner = task.owner
+            p2_task.id = task_id
+            client.task_dependencies[task.id].deps.append(task_id)
+            client.task_dependencies[task.id].descr.append('p2_e%d' % n)
+            tasks.append(p2_task)
+        map(self.work_queue.queue.append, tasks)
+        return task.id
+
     def client_put_task(self, task):
         if task.owner in self.clients:
             client = self.clients[task.owner]
             client.lock.acquire()
             try:
-                task.id = client.next_task_id
-                client.next_task_id += 1
+                task.id = client.get_task_id()
                 if task.type == 'cv':
-                    if any(map(lambda x: x not in task.params, ['cv', 'estimator', 'scoring'])):
-                        raise AttributeError('Missing parameter; cv, estimator, scoring are needed')
-                    cv, estimator, scoring = task['cv'], task['estimator'], task['scoring']
-                    proba = 'proba' in task.params and task.params['proba']
-                    client.task_dependencies[task.id] = TaskDependency(task.id, 'list')
-                    tasks = list()
-                    for train, test in cv:
-                        task_id = client.next_task_id #TODO
-                        client.next_task_id += 1
-                        cv_task = dl_utils.Task(type='fit_predict', data=task.data, result='score', scoring=scoring,
-                                                estimator=estimator, proba=proba, train=train, test=test)
-                        cv_task.owner = task.owner
-                        cv_task.id = task_id
-                        client.task_dependencies[task.id].deps.append(task_id)
-                        tasks.append(cv_task)
-                    map(self.work_queue.queue.append, tasks)
-                    return task.id
+                    return self._cv_task(task)
+                elif task.type == 'stacking':
+                    return self._stacking_task(task)
                 else:
                     self.work_queue.queue.append(task)
                     return task.id
+            except Exception as e:
+                logger.error('Error:', exc_info=True)
+                raise
             finally:
                 client.lock.release()
 
@@ -200,13 +290,12 @@ class Client:
 
 
 class TaskDependency:
-    def __init__(self, parent, agg, deps=None):
-        if deps is None:
-            self.deps = list()
-        else:
-            self.deps = deps
+    def __init__(self, parent, agg, deps=None, descr=None, **kwargs):
+        self.deps = deps if deps is not None else list()
+        self.descr = descr if descr is not None else list()
         self.parent = parent
         self.agg = agg
+        self.args = kwargs
 
 
 def main():

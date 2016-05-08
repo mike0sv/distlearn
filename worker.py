@@ -5,11 +5,12 @@ import os
 import socket
 import sys
 import time
+
 from sklearn.utils import safe_indexing
+
 from dl_utils import *
 
 __author__ = 'Mike'
-
 
 Pyro4.config.SERIALIZER = 'pickle'
 Pyro4.config.SERIALIZERS_ACCEPTED.add('pickle')
@@ -52,6 +53,8 @@ class WorkerProxy:
         self.id = name
 
     def check_data(self, client_id, task_id, name):
+        if not isinstance(name, str):
+            return True
         if name in self.datasets:
             return True
         data = self.master.worker_get_data(name)
@@ -62,39 +65,52 @@ class WorkerProxy:
             self.master.worker_put_error(client_id, task_id, self.id, 'Cannot load data %s' % name)
             return False
 
-    def fit(self, task):
-        data = self.datasets[task.data]
+    def get_data(self, task, need_test=True):
+        # train, target, test, test_target = self.get_data(task)
+        if isinstance(task.data, str):
+            data = self.datasets[task.data]
+        else:
+            data = task.data
+
         train = data['data']
-        target = data['target']
+        target = data['target'] if 'target' in data else None
+
         if 'train' in task.params:
-            #train = train[task['train']]
-            #target = target[task['train']]
             train = safe_indexing(train, task['train'])
-            target = safe_indexing(target, task['train'])
+            if target is not None:
+                target = safe_indexing(target, task['train'])
+        if need_test:
+            test_data = data
+            if 'test_data' in task.params:
+                if isinstance(task['test_data'], str):
+                    test_data = self.datasets[task['test_data']]
+                else:
+                    test_data = task['test_data']
+
+            test = test_data['data']
+            if 'test' in task.params:
+                test = safe_indexing(test, task['test'])
+
+            test_target = test_data['target'] if 'target' in test_data else None
+            if 'test' in task.params and test_target is not None:
+                test_target = safe_indexing(test_target, task['test'])
+        else:
+            test = None
+            test_target = None
+
+        return train, target, test, test_target
+
+    def fit(self, task):
+        train, target, _, _ = self.get_data(task, False)
         estimator = task['estimator']
         estimator.fit(train, target)
         self.master.worker_put_result(task.owner, task.id, estimator)
 
     def fit_predict(self, task):
-        data = self.datasets[task.data]
-        train = data['data']
-        target = data['target']
-        if 'train' in task.params:
-            #train = train[task['train']]
-            #target = target[task['train']]
-            train = safe_indexing(train, task['train'])
-            target = safe_indexing(target, task['train'])
+        train, target, test, test_target = self.get_data(task)
+
         estimator = task['estimator']
         estimator.fit(train, target)
-
-        test_data = data
-        if 'test_data' in task.params:
-            test_data = task['test_data']
-
-        test = test_data['data']
-        if 'test' in task.params:
-            #test = test[task['test']]
-            test = safe_indexing(test, task['test'])
 
         if task['proba']:
             pred = estimator.predict_proba(test)
@@ -104,10 +120,6 @@ class WorkerProxy:
         if task['result'] == 'pred':
             self.master.worker_put_result(task.owner, task.id, pred)
         elif task['result'] == 'score':
-            test_target = test_data['target']
-            if 'test' in task.params:
-                #test_target = test_target[task['test']]
-                test_target = safe_indexing(test_target, task['test'])
             score = task['scoring'](test_target, pred)
             self.master.worker_put_result(task.owner, task.id, score)
 
@@ -135,9 +147,12 @@ class WorkerProxy:
 
                         logger.info('Done')
                 except Exception as e:
-                    logger.error("This shitty log " + e.message)
-                    raise
-        except Exception:
+                    logger.error("This shitty log " + e.message, exc_info=True)
+                    client_id, task_id = task.owner, task.id
+                    self.master.worker_put_error(client_id, task_id, self.id, 'Error: %s' % e.message)
+                    #raise
+        except:
+            pass
             raise
 
     def __enter__(self):

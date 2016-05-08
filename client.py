@@ -1,7 +1,8 @@
+import logging
 import os
 import socket
-import logging
 import sys
+
 from dl_utils import *
 
 __author__ = 'Mike'
@@ -35,16 +36,17 @@ class Client:
             return self.collect_task(task.id)
 
     def send_data(self, data_name, data):
+        if not isinstance(data, dict) or 'data' not in data:
+            raise AttributeError('Wrong data format')
         self.master.client_put_data(data_name, data)
 
     def cross_validate(self, data, estimator, scoring, cv, async=True):
         task = Task(data=data, estimator=estimator, scoring=scoring, cv=cv, type='cv')
-        task.owner = self.id
-        task.id = self.master.client_put_task(task)
-        if async:
-            return task.id
-        else:
-            return self.collect_task(task.id)
+        return self.send_task(task, async)
+
+    def stacking(self, data, estimators, estimator, cv, async=True):
+        task = Task(data=data, estimators=estimators, estimator=estimator, cv=cv, type='stacking')
+        return self.send_task(task, async)
 
     def collect_task(self, task_id):
         result = self.master.client_collect_task(self.id, task_id)
@@ -78,9 +80,70 @@ def test1(client):
     plt.show()
 
 
+def test2(client):
+    """
+
+    :type client: Client
+    """
+    from sklearn.ensemble import RandomForestRegressor
+    from sklearn.metrics import mean_squared_error
+    from sklearn.cross_validation import ShuffleSplit
+    import numpy as np
+
+    dataX = np.ones(1000) + np.random.uniform(0, 1, 1000)
+    dataX.sort()
+    dataX = dataX.reshape((1000, 1))
+    dataY = 5 * np.ones(1000) + np.random.uniform(0, 1, 1000)
+    dataY.sort()
+    dataY = dataY.reshape((1000, 1))
+    client.send_data('data1', {'data': dataX, 'target': dataY})
+
+    id1 = client.cross_validate('data1', RandomForestRegressor(n_estimators=1000, max_depth=100),
+                                mean_squared_error, ShuffleSplit(1000, 5, .2))
+
+    res1 = client.collect_task(id1)
+    print('done')
+    print(res1)
+
+
+def test3(client):
+    """
+
+    :type client: Client
+    """
+    from sklearn.ensemble import RandomForestRegressor
+    from sklearn.linear_model import LinearRegression
+    from sklearn.metrics import mean_squared_error
+    from sklearn.cross_validation import ShuffleSplit, KFold
+    import numpy as np
+
+    dataX = np.ones(1000) + np.random.uniform(0, 1, 1000)
+    dataX.sort()
+    dataX = dataX.reshape((1000, 1))
+    dataY = 5 * np.ones(1000) + np.random.uniform(0, 1, 1000)
+    dataY.sort()
+    dataY = dataY.reshape((1000, 1))
+    client.send_data('data1', {'data': dataX, 'target': dataY})
+
+    id1 = client.stacking('data1', [RandomForestRegressor(n_estimators=1000, max_depth=100),
+                                    RandomForestRegressor(n_estimators=1000, max_depth=2)],
+                          LinearRegression(), KFold(1000, 3))
+
+    res1 = client.collect_task(id1)
+    print('done')
+    print(res1)
+
+    import matplotlib.pyplot as plt
+
+    plt.plot(dataX, res1, color='green')
+    plt.plot(dataX, dataY, '.', alpha=.1)
+    plt.show()
+
 def main():
     client = Client(CLIENTNAME, sys.argv[1], 5555)
-    test1(client)
+    # test1(client)
+    #test2(client)
+    test3(client)
 
 
 if __name__ == '__main__':
