@@ -132,7 +132,7 @@ class WorkerProxy:
                     time.sleep(5)
                 else:
                     logger.info('Got %s' % task)
-                    raise AttributeError('lol')
+                    # raise AttributeError('lol')
                     client_id, task_id = task.owner, task.id
                     if not self.check_data(client_id, task_id, task.data):
                         continue
