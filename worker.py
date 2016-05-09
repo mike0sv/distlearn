@@ -3,7 +3,6 @@ from __future__ import print_function, with_statement, division
 import logging
 import os
 import socket
-import sys
 import time
 
 from sklearn.utils import safe_indexing
@@ -124,36 +123,36 @@ class WorkerProxy:
             self.master.worker_put_result(task.owner, task.id, score)
 
     def event_loop(self):
-        try:
-            while True:
+        while True:
+            try:
+                logger.debug("Acquiring task")
+                task = self.master.worker_get_work(self.id)
+                if task is None:
+                    logger.debug("No tasks available yet")
+                    time.sleep(5)
+                else:
+                    logger.info('Got %s' % task)
+                    raise AttributeError('lol')
+                    client_id, task_id = task.owner, task.id
+                    if not self.check_data(client_id, task_id, task.data):
+                        continue
+                    if 'test_data' in task.params and not self.check_data(client_id, task_id, task['test_data']):
+                        continue
+
+                    if task.type == 'fit_predict':
+                        self.fit_predict(task)
+                    elif task.type == 'fit':
+                        self.fit(task)
+
+                    logger.info('Done')
+            except Exception as e:
+                logger.error("This shitty log " + e.message, exc_info=True)
                 try:
-                    logger.debug("Acquiring task")
-                    task = self.master.worker_get_work()
-                    if task is None:
-                        logger.debug("No tasks available yet")
-                        time.sleep(5)
-                    else:
-                        logger.info('Got %s' % task)
-                        client_id, task_id = task.owner, task.id
-                        if not self.check_data(client_id, task_id, task.data):
-                            continue
-                        if 'test_data' in task.params and not self.check_data(client_id, task_id, task['test_data']):
-                            continue
-
-                        if task.type == 'fit_predict':
-                            self.fit_predict(task)
-                        elif task.type == 'fit':
-                            self.fit(task)
-
-                        logger.info('Done')
-                except Exception as e:
-                    logger.error("This shitty log " + e.message, exc_info=True)
                     client_id, task_id = task.owner, task.id
                     self.master.worker_put_error(client_id, task_id, self.id, 'Error: %s' % e.message)
-                    #raise
-        except:
-            pass
-            raise
+                except AttributeError:
+                    pass
+                    # raise
 
     def __enter__(self):
         return self

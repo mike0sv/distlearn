@@ -1,8 +1,40 @@
+import sys
 import threading
 
 import Pyro4
 
 __author__ = 'Mike'
+
+if sys.version_info[0] >= 3:
+    # Python 3
+    # noinspection PyShadowingBuiltins
+    basestring = str
+    # noinspection PyShadowingBuiltins
+    unicode = str
+    # noinspection PyShadowingBuiltins
+    long = int
+
+
+    def itervalues(d):
+        return iter(d.values())
+
+
+    def iteritems(d):
+        return iter(d.items())
+else:
+    # Python 2
+    # noinspection PyShadowingBuiltins
+    range = xrange
+
+
+    def itervalues(d):
+        # noinspection PyCompatibility
+        return d.itervalues()
+
+
+    def iteritems(d):
+        # noinspection PyCompatibility
+        return d.iteritems()
 
 
 class RepeatedTimer(threading.Thread):
@@ -55,14 +87,34 @@ class MasterWrapper:
 
 class Task:
     def __init__(self, type, data, **kwargs):
-        self.id = -1  # random.randint(0, 2 ** 31)
+        self.id = None  # random.randint(0, 2 ** 31)
         self.data = data
         self.type = type
         self.owner = None
         self.params = kwargs
+        self.worker_id = None
 
     def __getitem__(self, item):
         return self.params[item]
 
     def __repr__(self):
         return '<Task id=%d, owner=%s>' % (self.id, self.owner)
+
+"""
+class bidict(dict):
+    def __init__(self, *args, **kwargs):
+        super(bidict, self).__init__(*args, **kwargs)
+        self.inverse = {}
+        for key, value in self.items():
+            self.inverse.setdefault(value, []).append(key)
+
+    def __setitem__(self, key, value):
+        super(bidict, self).__setitem__(key, value)
+        self.inverse.setdefault(value, []).append(key)
+
+    def __delitem__(self, key):
+        self.inverse.setdefault(self[key], []).remove(key)
+        if self[key] in self.inverse and not self.inverse[self[key]]:
+            del self.inverse[self[key]]
+        super(bidict, self).__delitem__(key)
+"""

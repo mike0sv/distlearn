@@ -55,32 +55,23 @@ class Master:
 
     def _aggregate_tasks_stacking(self, client, task_id, dep):
         if 'p3' not in dep.descr:
-            try:
-                client.lock.acquire()
+            with client.lock:
                 fold_est_dict = dict(zip(dep.descr, map(lambda x: client.results[x], dep.deps)))
                 est_count = len([0 for d in dep.descr if d.startswith('p2')])
                 folds_count = int(len([0 for d in dep.descr if d.startswith('p1')]) / est_count)
-                #print(est_count, folds_count)
-                #print(fold_est_dict['p1_f0_e0'].shape, fold_est_dict['p2_e0'].shape)
                 p3_train = np.vstack([np.vstack([fold_est_dict['p1_f%d_e%d' % (fold, n)] for n in range(est_count)]).T
                                       for fold in range(folds_count)])
                 p3_test = np.vstack([fold_est_dict['p2_e%d' % n] for n in range(est_count)]).T
-                p3_task_id = client.get_task_id()
                 data = {'data': p3_train, 'target': self.datasets[dep.args['data']]['target']}
                 test_data = {'data': p3_test}
-                #print(data['data'].shape, data['target'].shape, p3_test.shape)
                 estimator = dep.args['estimator']
                 proba = dep.args['proba']
                 result = dep.args['result']
-                p3_task = dl_utils.Task(type='fit_predict', result=result, data=data, test_data=test_data,
-                                        estimator=estimator, proba=proba)
-                p3_task.owner = client.id
-                p3_task.id = p3_task_id
-                client.task_dependencies[task_id].deps.append(p3_task_id)
+                p3_task = client.create_task(type='fit_predict', result=result, data=data, test_data=test_data,
+                                             estimator=estimator, proba=proba)
+                client.task_dependencies[task_id].deps.append(p3_task.id)
                 client.task_dependencies[task_id].descr.append('p3')
                 self.work_queue.queue.append(p3_task)
-            finally:
-                client.lock.release()
             return False
         else:
             fold_est_dict = dict(zip(dep.descr, map(lambda x: client.results[x], dep.deps)))
@@ -91,7 +82,6 @@ class Master:
         for client in self.clients.values():
             done = list()
             for parent, dep in iteritems(client.task_dependencies):
-                #print(zip(dep.descr, map(lambda x: x in client.results, dep.deps)))
                 if all(map(lambda x: x in client.results, dep.deps)):
                     agg = self.aggs[dep.agg](client, parent, dep)
                     if agg is None or agg:
@@ -100,7 +90,7 @@ class Master:
 
     def _check_heartbeat(self):
         clock = time.time()
-        for name, worker in filter(lambda w: not w[1].dead, iter(self.workers.items())):
+        for name, worker in filter(lambda w: not w[1].dead, iteritems(self.workers)):
             if worker.last_heartbeat + self.heartbeat_interval < clock:
                 logger.warn('Worker %s disconnected' % name)
                 worker.dead = True
@@ -118,20 +108,27 @@ class Master:
             logger.info('Worker %s connected' % worker_name)
             self.workers[worker_name] = Worker(worker_name)
 
-    def worker_get_work(self):
+    def worker_get_work(self, worker_id):
         try:
-            return self.work_queue.get(timeout=.5)
+            task = self.work_queue.get(timeout=.5)
+            task.worker_id = worker_id
+            return task
         except queue.Empty:
             return None
 
     def worker_put_result(self, client_id, task_id, result):
         logger.debug('Received result %d for %s' % (task_id, client_id))
-        self.clients[client_id].results[task_id] = result
+        client = self.clients[client_id]
+        client.results[task_id] = result
+        del client.tasks[task_id]
 
     def worker_put_error(self, client_id, task_id, worker_id, error):
         logger.info('Received error %s from worker %s in task %s' % (error, worker_id, task_id))
         try:
-            self.clients[client_id].worker_errors.append((task_id, worker_id, error))
+            client = self.clients[client_id]
+            client.worker_errors.append((task_id, worker_id, error))
+            task = client.tasks[task_id]
+            self.work_queue.queue.append(task)
         except:
             # TODO
             pass
@@ -163,12 +160,9 @@ class Master:
         client.task_dependencies[task.id] = TaskDependency(task.id, agg_type)
         tasks = list()
         for train, test in cv:
-            task_id = client.get_task_id()
-            cv_task = dl_utils.Task(type='fit_predict', data=task.data, result=result, scoring=scoring,
-                                    estimator=estimator, proba=proba, train=train, test=test)
-            cv_task.owner = task.owner
-            cv_task.id = task_id
-            client.task_dependencies[task.id].deps.append(task_id)
+            cv_task = client.create_task(type='fit_predict', data=task.data, result=result, scoring=scoring,
+                                         estimator=estimator, proba=proba, train=train, test=test)
+            client.task_dependencies[task.id].deps.append(cv_task.id)
             tasks.append(cv_task)
         map(self.work_queue.queue.append, tasks)
         return task.id
@@ -185,22 +179,16 @@ class Master:
         tasks = list()
         for fold, (train, test) in enumerate(cv):
             for n, est in enumerate(estimators):
-                task_id = client.get_task_id()
-                cv_task = dl_utils.Task(type='fit_predict', result='pred', data=task.data,
-                                        estimator=est, proba=proba, train=train, test=test)
-                cv_task.owner = task.owner
-                cv_task.id = task_id
-                client.task_dependencies[task.id].deps.append(task_id)
+                p1_task = client.create_task(type='fit_predict', result='pred', data=task.data,
+                                             estimator=est, proba=proba, train=train, test=test)
+                client.task_dependencies[task.id].deps.append(p1_task.id)
                 client.task_dependencies[task.id].descr.append('p1_f%d_e%d' % (fold, n))
-                tasks.append(cv_task)
+                tasks.append(p1_task)
 
         for n, est in enumerate(estimators):
-            task_id = client.get_task_id()
-            p2_task = dl_utils.Task(type='fit_predict', result='pred', data=task.data,
-                                    estimator=est, proba=proba)
-            p2_task.owner = task.owner
-            p2_task.id = task_id
-            client.task_dependencies[task.id].deps.append(task_id)
+            p2_task = client.create_task(type='fit_predict', result='pred', data=task.data,
+                                         estimator=est, proba=proba)
+            client.task_dependencies[task.id].deps.append(p2_task.id)
             client.task_dependencies[task.id].descr.append('p2_e%d' % n)
             tasks.append(p2_task)
         map(self.work_queue.queue.append, tasks)
@@ -209,35 +197,30 @@ class Master:
     def client_put_task(self, task):
         if task.owner in self.clients:
             client = self.clients[task.owner]
-            client.lock.acquire()
-            try:
-                task.id = client.get_task_id()
-                if task.type == 'cv':
-                    return self._cv_task(task)
-                elif task.type == 'stacking':
-                    return self._stacking_task(task)
-                else:
-                    self.work_queue.queue.append(task)
-                    return task.id
-            except Exception as e:
-                logger.error('Error:', exc_info=True)
-                raise
-            finally:
-                client.lock.release()
+            with client.lock:
+                try:
+                    task.id = client.get_task_id()
+                    if task.type == 'cv':
+                        return self._cv_task(task)
+                    elif task.type == 'stacking':
+                        return self._stacking_task(task)
+                    else:
+                        self.work_queue.queue.append(task)
+                        return task.id
+                except Exception:
+                    logger.error('Error:', exc_info=True)
+                    raise
 
     def client_put_data(self, name, data):
         self.datasets[name] = data
 
     def client_register(self, client_id):
-        self.lock_clients.acquire()
-        try:
+        with self.lock_clients:
             if client_id in self.clients:
                 logger.warn('Client %s already connected')
             else:
                 logger.info('Client %s connected' % client_id)
                 self.clients[client_id] = Client(client_id)
-        finally:
-            self.lock_clients.release()
 
     def client_get_workers(self):
         return self.workers
@@ -268,25 +251,40 @@ class Master:
 
 
 class Worker:
-    def __init__(self, id):
-        self.id = id
+    def __init__(self, worker_id):
+        self.id = worker_id
         self.last_heartbeat = time.time()
         self.dead = False
 
 
 class Client:
-    def __init__(self, id):
+    def __init__(self, client_id):
         self.lock = Lock()
-        self.id = id
+        self.id_lock = Lock()
+        self.id = client_id
         self.results = dict()
         self.worker_errors = list()
         self.next_error = 0
         self.next_task_id = 0
         self.task_dependencies = dict()
+        self.tasks = dict()
 
     def get_task_id(self):
-        self.next_task_id += 1
-        return self.next_task_id - 1
+        with self.id_lock:
+            self.next_task_id += 1
+            return self.next_task_id - 1
+
+    def create_task(self, type, data, **kwargs):
+        task = dl_utils.Task(type, data, **kwargs)
+        task.owner = self.id
+        task.id = self.get_task_id()
+        self.tasks[task.id] = task
+        return task
+
+    def add_task(self, task):
+        if task.id is None:
+            task.id = self.get_task_id()
+        self.tasks[task.id] = task
 
 
 class TaskDependency:

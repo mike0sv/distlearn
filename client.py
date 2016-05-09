@@ -1,7 +1,6 @@
 import logging
 import os
 import socket
-import sys
 
 from dl_utils import *
 
@@ -113,8 +112,7 @@ def test3(client):
     """
     from sklearn.ensemble import RandomForestRegressor
     from sklearn.linear_model import LinearRegression
-    from sklearn.metrics import mean_squared_error
-    from sklearn.cross_validation import ShuffleSplit, KFold
+    from sklearn.cross_validation import KFold
     import numpy as np
 
     dataX = np.ones(1000) + np.random.uniform(0, 1, 1000)
@@ -139,10 +137,11 @@ def test3(client):
     plt.plot(dataX, dataY, '.', alpha=.1)
     plt.show()
 
+
 def main():
     client = Client(CLIENTNAME, sys.argv[1], 5555)
     # test1(client)
-    #test2(client)
+    # test2(client)
     test3(client)
 
 
