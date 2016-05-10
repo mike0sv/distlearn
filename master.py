@@ -1,5 +1,6 @@
 from __future__ import print_function, with_statement, division
 
+import argparse
 import logging
 import sys
 import time
@@ -26,6 +27,8 @@ logger.setLevel(logging.DEBUG)
 log_handler = logging.StreamHandler(sys.stdout)
 log_handler.setFormatter(logging.Formatter('[%(asctime)s] [%(levelname)s] %(message)s'))
 logger.addHandler(log_handler)
+
+WORKER_FAIL_TIMEOUT = 5
 
 
 # noinspection PyMethodMayBeStatic
@@ -111,16 +114,22 @@ class Master:
     def worker_get_work(self, worker_id):
         try:
             task = self.work_queue.get(timeout=.5)
+            if worker_id in task.failed_by and time.time() - task.failed_by[worker_id] < WORKER_FAIL_TIMEOUT:
+                self.work_queue.queue.appendleft(task)
+                return None
             task.worker_id = worker_id
             return task
         except queue.Empty:
             return None
 
     def worker_put_result(self, client_id, task_id, result):
-        logger.debug('Received result %d for %s' % (task_id, client_id))
-        client = self.clients[client_id]
-        client.results[task_id] = result
-        del client.tasks[task_id]
+        try:
+            logger.debug('Received result %d for %s' % (task_id, client_id))
+            client = self.clients[client_id]
+            client.results[task_id] = result
+            del client.tasks[task_id]
+        except:
+            logger.error("Error", exc_info=True)
 
     def worker_put_error(self, client_id, task_id, worker_id, error):
         logger.info('Received error %s from worker %s in task %s' % (error, worker_id, task_id))
@@ -128,8 +137,9 @@ class Master:
             client = self.clients[client_id]
             client.worker_errors.append((task_id, worker_id, error))
             task = client.tasks[task_id]
+            task.failed_by[worker_id] = time.time()
             self.work_queue.queue.append(task)
-        except:
+        finally:
             # TODO
             pass
 
@@ -169,13 +179,13 @@ class Master:
 
     def _stacking_task(self, task):
         client = self.clients[task.owner]
-        self._check_params(task, ['cv', 'estimators', 'estimator'])
+        self._check_params(task, ['cv', 'estimators', 'estimator', 'test_data'])
 
-        cv, estimators, estimator = task['cv'], task['estimators'], task['estimator']
+        cv, estimators, estimator, test_data = task['cv'], task['estimators'], task['estimator'], task['test_data']
         proba = 'proba' in task.params and task.params['proba']
         result = 'pred' if 'result' not in task.params else task['result']
-        client.task_dependencies[task.id] = TaskDependency(task.id, 'stacking', estimator=estimator,
-                                                           proba=proba, data=task.data, result=result)
+        client.task_dependencies[task.id] = TaskDependency(task.id, 'stacking', estimator=estimator, proba=proba,
+                                                           data=task.data, result=result, test_data=test_data)
         tasks = list()
         for fold, (train, test) in enumerate(cv):
             for n, est in enumerate(estimators):
@@ -186,7 +196,7 @@ class Master:
                 tasks.append(p1_task)
 
         for n, est in enumerate(estimators):
-            p2_task = client.create_task(type='fit_predict', result='pred', data=task.data,
+            p2_task = client.create_task(type='fit_predict', result='pred', data=task.data, test_data=test_data,
                                          estimator=est, proba=proba)
             client.task_dependencies[task.id].deps.append(p2_task.id)
             client.task_dependencies[task.id].descr.append('p2_e%d' % n)
@@ -199,7 +209,7 @@ class Master:
             client = self.clients[task.owner]
             with client.lock:
                 try:
-                    task.id = client.get_task_id()
+                    client.add_task(task)
                     if task.type == 'cv':
                         return self._cv_task(task)
                     elif task.type == 'stacking':
@@ -212,6 +222,7 @@ class Master:
                     raise
 
     def client_put_data(self, name, data):
+        logger.info('Got data "%s"' % name)
         self.datasets[name] = data
 
     def client_register(self, client_id):
@@ -227,26 +238,26 @@ class Master:
 
     def client_get_errors(self, client_id, offset='new'):  # TODO offset? really?
         try:
+            client = self.clients[client_id]
             next_error = 0
             if offset == 'new':
-                next_error = self.clients[client_id].next_error
+                next_error = client.next_error
             if type(offset) is int:
                 next_error = offset
-            if next_error < self.clients[client_id].next_error:
-                self.clients[client_id].next_error = next_error
-            return self.clients[client_id].worker_errors[next_error:]
-        except:
+            client.next_error = len(client.worker_errors)
+            return list(enumerate(client.worker_errors))[next_error:]
+        finally:
             pass  # TODO
 
     def client_collect_task(self, client_id, task_id, timeout=None):
-        logger.debug('Collecting result %d' % task_id)
+        logger.debug('Collecting result %d for %s' % (task_id, client_id))
         start = time.time()
         while task_id not in self.clients[client_id].results:
             if timeout is not None and time.time() - start() > timeout:
                 return None
             time.sleep(.2)
         res = self.clients[client_id].results[task_id]
-        del self.clients[client_id].results[task_id]
+        #del self.clients[client_id].results[task_id]
         return res
 
 
@@ -296,16 +307,27 @@ class TaskDependency:
         self.args = kwargs
 
 
-def main():
-    host = '0.0.0.0'
-    port = 5555
-
+def start_master(host, port):
     daemon = dl_utils.Pyro4.core.Daemon(host, port)
     master = Master()
     uri = daemon.register(master, "master")
 
     logger.info("Master is running on " + str(uri))
     daemon.requestLoop()
+    logger.info("Exiting")
+    master.heartbeat.join()
+    master.heartbeat.stop()
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--host', help='Master host', default='0.0.0.0')
+    parser.add_argument('-p', '--port', help='Master port', default=5555, type=int)
+    parser.add_argument('-v', '--verbosity', help='0=DEBUG 1=INFO 2=WARN 3=ERROR', default=1, type=int)
+    args = parser.parse_args()
+    levels = {0: logging.DEBUG, 1: logging.INFO, 2: logging.WARN, 3: logging.ERROR}
+    logger.setLevel(levels[args.verbosity])
+    start_master(args.host, args.port)
 
 
 if __name__ == '__main__':

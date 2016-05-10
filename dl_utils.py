@@ -65,21 +65,31 @@ class RepeatedTimer(threading.Thread):
 # noinspection PyProtectedMember
 class MasterWrapper:
     def __init__(self, uri, name, logger):
-        self.proxy = None
         self.name = name
         self.logger = logger
-        try:
-            self.proxy = Pyro4.core.Proxy(uri)
-        except (Pyro4.errors.CommunicationError, Pyro4.errors.ConnectionClosedError):
-            self.proxy._pyroReconnect()
-        logger.info("Connected to master")
+        self.proxy = Pyro4.core.Proxy(uri)
 
     def __getattr__(self, item):
         while True:
             try:
-                return self.proxy.__getattr__(item)
+                return RemoteObjectWrapper(self.proxy.__getattr__(item), self.logger, self.proxy)
+            except (Pyro4.errors.CommunicationError, Pyro4.errors.ConnectionClosedError):
+                self.logger.warn("Connection lost, retrying")
+                self.proxy._pyroReconnect()
+                self.logger.info("Connection restored")
+
+
+class RemoteObjectWrapper:
+    def __init__(self, remote_object, logger, proxy):
+        self.ro = remote_object
+        self.logger = logger
+        self.proxy = proxy
+
+    def __call__(self, *args, **kwargs):
+        while True:
+            try:
+                return self.ro(*args, **kwargs)
             except (Pyro4.errors.CommunicationError, Pyro4.errors.ConnectionClosedError) as e:
-                print(e)
                 self.logger.warn("Connection lost, retrying")
                 self.proxy._pyroReconnect()
                 self.logger.info("Connection restored")
@@ -93,12 +103,14 @@ class Task:
         self.owner = None
         self.params = kwargs
         self.worker_id = None
+        self.failed_by = dict()
 
     def __getitem__(self, item):
         return self.params[item]
 
     def __repr__(self):
         return '<Task id=%d, owner=%s>' % (self.id, self.owner)
+
 
 """
 class bidict(dict):

@@ -1,5 +1,6 @@
 from __future__ import print_function, with_statement, division
 
+import argparse
 import logging
 import os
 import socket
@@ -36,17 +37,19 @@ class Heartbeat:
     def send(self):
         try:
             self.master.worker_send_heartbeat(WORKERNAME)
-        except Exception:
+        except (Pyro4.errors.CommunicationError, Pyro4.errors.ConnectionClosedError):
             self.timer.pause()
             self.master._pyroReconnect()
             self.timer.resume()
 
 
+# noinspection PyPep8Naming
 class WorkerProxy:
     def __init__(self, name, host, port):
         logger.info("This is worker %s" % name)
         self.master = MasterWrapper("PYRO:master@%s:%d" % (host, port), name, logger)
         self.master.worker_register(name)
+        logger.info("Connected to master")
         self.heartbeat_timer = Heartbeat(self.master.proxy, .5)
         self.datasets = dict()
         self.id = name
@@ -111,7 +114,7 @@ class WorkerProxy:
         estimator = task['estimator']
         estimator.fit(train, target)
 
-        if task['proba']:
+        if 'proba' in task.params and task['proba']:
             pred = estimator.predict_proba(test)
         else:
             pred = estimator.predict(test)
@@ -146,12 +149,14 @@ class WorkerProxy:
 
                     logger.info('Done')
             except Exception as e:
-                logger.error("This shitty log " + e.message, exc_info=True)
+                logger.error("This shitty log", exc_info=True)
                 try:
                     client_id, task_id = task.owner, task.id
-                    self.master.worker_put_error(client_id, task_id, self.id, 'Error: %s' % e.message)
+                    self.master.worker_put_error(client_id, task_id, self.id, 'Error: %s' % str(e.message))
                 except AttributeError:
                     pass
+                if isinstance(e, KeyboardInterrupt):
+                    return
                     # raise
 
     def __enter__(self):
@@ -168,7 +173,14 @@ class WorkerProxy:
 
 
 def main():
-    with WorkerProxy(WORKERNAME, sys.argv[1], 5555) as worker:
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-m', '--master', help='Master host', default='localhost')
+    parser.add_argument('-p', '--port', help='Master port', default=5555, type=int)
+    parser.add_argument('-v', '--verbosity', help='0=DEBUG 1=INFO 2=WARN 3=ERROR', default=1, type=int)
+    args = parser.parse_args()
+    levels = {0: logging.DEBUG, 1: logging.INFO, 2: logging.WARN, 3: logging.ERROR}
+    logger.setLevel(levels[args.verbosity])
+    with WorkerProxy(WORKERNAME, args.master, args.port) as worker:
         worker.event_loop()
     logger.info('Exiting')
 

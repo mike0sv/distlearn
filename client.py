@@ -19,15 +19,17 @@ CLIENTNAME = "Client_%d@%s" % (os.getpid(), socket.gethostname())
 
 
 class Client:
-    def __init__(self, name, host, port):
+    def __init__(self, name, host='localhost', port=5555):
         address = '%s:%d' % (host, port)
         self.id = name
         logger.info("This is client %s" % name)
         self.master = MasterWrapper("PYRO:master@" + address, name, logger)
         self.master.client_register(name)
+        logger.info("Connected to master")
 
     def send_task(self, task, async=True):
         task.owner = self.id
+        task.id = None
         task.id = self.master.client_put_task(task)
         if async:
             return task.id
@@ -43,14 +45,17 @@ class Client:
         task = Task(data=data, estimator=estimator, scoring=scoring, cv=cv, type='cv')
         return self.send_task(task, async)
 
-    def stacking(self, data, estimators, estimator, cv, async=True):
-        task = Task(data=data, estimators=estimators, estimator=estimator, cv=cv, type='stacking')
+    def stacking(self, data, test_data, estimators, estimator, cv, result='pred', async=True):
+        task = Task(data=data, test_data=test_data, estimators=estimators, estimator=estimator, result=result,
+                    cv=cv, type='stacking')
         return self.send_task(task, async)
 
     def collect_task(self, task_id):
         result = self.master.client_collect_task(self.id, task_id)
         return result
 
+    def check_errors(self):
+        return self.master.client_collect_errors(self.id)
 
 def test1(client):
     from sklearn.ensemble import RandomForestRegressor
