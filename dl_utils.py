@@ -95,8 +95,8 @@ class RemoteObjectWrapper:
                 self.logger.info("Connection restored")
 
 
-class Task:
-    def __init__(self, type, data, **kwargs):
+class Task():
+    def __init__(self, type, data, description, auto=False, **kwargs):
         self.id = None  # random.randint(0, 2 ** 31)
         self.data = data
         self.type = type
@@ -104,6 +104,22 @@ class Task:
         self.params = kwargs
         self.worker_id = None
         self.failed_by = dict()
+        self.auto = auto
+        self.failed = False
+        self.last_error = None
+        self.canceled = False
+        self.done = False
+        self.description = description
+
+    def info(self):
+        data = self.data if isinstance(self.data, str) else type(self.data)
+        str_params = ['type', 'worker_id', 'auto', 'failed', 'last_error', 'canceled', 'done']
+        str_values = [self.type, self.worker_id, self.auto, self.failed, self.last_error, self.canceled, self.done]
+        info = "Task %d (%s), owner %s, data %s. " % (
+        self.id if self.id is not None else -1, self.description, self.owner, data)
+        info += ', '.join([p + ': %s' % v for p, v in zip(str_params, str_values)]) + '. '
+        info += ', '.join([p + ': %s' % v for p, v in iteritems(self.params)])
+        return info
 
     def __getitem__(self, item):
         return self.params[item]

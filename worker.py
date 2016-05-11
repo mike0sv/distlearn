@@ -29,14 +29,15 @@ WORKERNAME = "Worker_%d@%s" % (os.getpid(), socket.gethostname())
 
 # noinspection PyProtectedMember
 class Heartbeat:
-    def __init__(self, master, interval):
+    def __init__(self, master, interval, name):
         self.master = Pyro4.core.Proxy(master._pyroUri)
         self.timer = RepeatedTimer(interval, self.send)
         self.timer.start()
+        self.name = name
 
     def send(self):
         try:
-            self.master.worker_send_heartbeat(WORKERNAME)
+            self.master.worker_send_heartbeat(self.name)
         except (Pyro4.errors.CommunicationError, Pyro4.errors.ConnectionClosedError):
             self.timer.pause()
             self.master._pyroReconnect()
@@ -50,7 +51,7 @@ class WorkerProxy:
         self.master = MasterWrapper("PYRO:master@%s:%d" % (host, port), name, logger)
         self.master.worker_register(name)
         logger.info("Connected to master")
-        self.heartbeat_timer = Heartbeat(self.master.proxy, .5)
+        self.heartbeat_timer = Heartbeat(self.master.proxy, .5, name)
         self.datasets = dict()
         self.id = name
 
@@ -172,6 +173,11 @@ class WorkerProxy:
         self.heartbeat_timer.timer.stop()
 
 
+def run_worker(name, host, port):
+    with WorkerProxy(name, host, port) as worker:
+        worker.event_loop()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('-m', '--master', help='Master host', default='localhost')
@@ -180,8 +186,7 @@ def main():
     args = parser.parse_args()
     levels = {0: logging.DEBUG, 1: logging.INFO, 2: logging.WARN, 3: logging.ERROR}
     logger.setLevel(levels[args.verbosity])
-    with WorkerProxy(WORKERNAME, args.master, args.port) as worker:
-        worker.event_loop()
+    run_worker(WORKERNAME, args.master, args.port)
     logger.info('Exiting')
 
 

@@ -41,13 +41,13 @@ class Client:
             raise AttributeError('Wrong data format')
         self.master.client_put_data(data_name, data)
 
-    def cross_validate(self, data, estimator, scoring, cv, async=True):
-        task = Task(data=data, estimator=estimator, scoring=scoring, cv=cv, type='cv')
+    def cross_validate(self, description, data, estimator, scoring, cv, async=True):
+        task = Task(data=data, description=description, estimator=estimator, scoring=scoring, cv=cv, type='cv')
         return self.send_task(task, async)
 
-    def stacking(self, data, test_data, estimators, estimator, cv, result='pred', async=True):
-        task = Task(data=data, test_data=test_data, estimators=estimators, estimator=estimator, result=result,
-                    cv=cv, type='stacking')
+    def stacking(self, description, data, test_data, estimators, estimator, cv, result='pred', async=True):
+        task = Task(data=data, description=description, test_data=test_data, estimators=estimators, estimator=estimator,
+                    result=result, cv=cv, type='stacking')
         return self.send_task(task, async)
 
     def collect_task(self, task_id):
@@ -55,7 +55,17 @@ class Client:
         return result
 
     def check_errors(self):
-        return self.master.client_collect_errors(self.id)
+        return self.master.client_get_errors(self.id)
+
+    def cancel_task(self, task_id):
+        return self.master.client_cancel_task(self.id, task_id)
+
+    def list_tasks(self, auto=False, failed=None, completed=None, canceled=None):
+        return self.master.client_list_tasks(self.id, auto, failed, completed, canceled)
+
+    def get_task(self, task_id):
+        return self.master.client_get_task(self.id, task_id)
+
 
 def test1(client):
     from sklearn.ensemble import RandomForestRegressor
@@ -128,8 +138,8 @@ def test3(client):
     dataY = dataY.reshape((1000, 1))
     client.send_data('data1', {'data': dataX, 'target': dataY})
 
-    id1 = client.stacking('data1', [RandomForestRegressor(n_estimators=1000, max_depth=100),
-                                    RandomForestRegressor(n_estimators=1000, max_depth=2)],
+    id1 = client.stacking('stack task1', 'data1', 'data1', [RandomForestRegressor(n_estimators=1000, max_depth=100),
+                                                            RandomForestRegressor(n_estimators=1000, max_depth=2)],
                           LinearRegression(), KFold(1000, 3))
 
     res1 = client.collect_task(id1)

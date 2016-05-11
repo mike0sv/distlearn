@@ -4,7 +4,7 @@ import argparse
 import logging
 import sys
 import time
-from threading import Lock
+from threading import Lock, Thread
 
 import numpy as np
 from future.utils import iteritems
@@ -28,7 +28,7 @@ log_handler = logging.StreamHandler(sys.stdout)
 log_handler.setFormatter(logging.Formatter('[%(asctime)s] [%(levelname)s] %(message)s'))
 logger.addHandler(log_handler)
 
-WORKER_FAIL_TIMEOUT = 5
+WORKER_FAIL_TIMEOUT = 20
 
 
 # noinspection PyMethodMayBeStatic
@@ -70,7 +70,9 @@ class Master:
                 estimator = dep.args['estimator']
                 proba = dep.args['proba']
                 result = dep.args['result']
-                p3_task = client.create_task(type='fit_predict', result=result, data=data, test_data=test_data,
+                p3_task = client.create_task(type='fit_predict', data=data,
+                                             description=client.tasks[task_id].description + ', phase 3',
+                                             test_data=test_data, result=result,
                                              estimator=estimator, proba=proba)
                 client.task_dependencies[task_id].deps.append(p3_task.id)
                 client.task_dependencies[task_id].descr.append('p3')
@@ -89,7 +91,14 @@ class Master:
                     agg = self.aggs[dep.agg](client, parent, dep)
                     if agg is None or agg:
                         done.append(parent)
-            map(client.task_dependencies.pop, done)
+                failed = filter(lambda x: client.tasks[x].failed, dep.deps)
+                if any(failed):
+                    client.tasks[parent].failed = True
+                    client.tasks[parent].last_error = client.tasks[failed[0]].last_error
+
+            for task_id in done:
+                client.task_dependencies.pop(task_id)
+                client.tasks[task_id].done = True
 
     def _check_heartbeat(self):
         clock = time.time()
@@ -114,9 +123,14 @@ class Master:
     def worker_get_work(self, worker_id):
         try:
             task = self.work_queue.get(timeout=.5)
-            if worker_id in task.failed_by and time.time() - task.failed_by[worker_id] < WORKER_FAIL_TIMEOUT:
-                self.work_queue.queue.appendleft(task)
-                return None
+            return_to_queue = list()
+            try:
+                while worker_id in task.failed_by and time.time() - task.failed_by[worker_id] < WORKER_FAIL_TIMEOUT:
+                    if not task.canceled:
+                        return_to_queue.append(task)
+                    task = self.work_queue.get(timeout=.5)
+            finally:
+                map(self.work_queue.queue.appendleft, reversed(return_to_queue))
             task.worker_id = worker_id
             return task
         except queue.Empty:
@@ -127,7 +141,8 @@ class Master:
             logger.debug('Received result %d for %s' % (task_id, client_id))
             client = self.clients[client_id]
             client.results[task_id] = result
-            del client.tasks[task_id]
+            client.tasks[task_id].done = True
+            # del client.tasks[task_id]
         except:
             logger.error("Error", exc_info=True)
 
@@ -138,6 +153,8 @@ class Master:
             client.worker_errors.append((task_id, worker_id, error))
             task = client.tasks[task_id]
             task.failed_by[worker_id] = time.time()
+            task.failed = True
+            task.last_error = (worker_id, error)
             self.work_queue.queue.append(task)
         finally:
             # TODO
@@ -161,6 +178,10 @@ class Master:
             raise AttributeError('Missing parameter; %s are needed' % ', '.join(params))
 
     def _cv_task(self, task):
+        """
+
+        :type task: dl_utils.Task
+        """
         client = self.clients[task.owner]
         self._check_params(task, ['cv', 'estimator', 'scoring'])
         cv, estimator, scoring = task['cv'], task['estimator'], task['scoring']
@@ -169,8 +190,9 @@ class Master:
         agg_type = 'list' if result == 'score' else 'hstack'
         client.task_dependencies[task.id] = TaskDependency(task.id, agg_type)
         tasks = list()
-        for train, test in cv:
-            cv_task = client.create_task(type='fit_predict', data=task.data, result=result, scoring=scoring,
+        for i, (train, test) in enumerate(cv):
+            cv_task = client.create_task(type='fit_predict', data=task.data,
+                                         description=task.description + ', fold %d' % i, result=result, scoring=scoring,
                                          estimator=estimator, proba=proba, train=train, test=test)
             client.task_dependencies[task.id].deps.append(cv_task.id)
             tasks.append(cv_task)
@@ -178,6 +200,10 @@ class Master:
         return task.id
 
     def _stacking_task(self, task):
+        """
+
+        :type task: Task
+        """
         client = self.clients[task.owner]
         self._check_params(task, ['cv', 'estimators', 'estimator', 'test_data'])
 
@@ -189,14 +215,18 @@ class Master:
         tasks = list()
         for fold, (train, test) in enumerate(cv):
             for n, est in enumerate(estimators):
-                p1_task = client.create_task(type='fit_predict', result='pred', data=task.data,
-                                             estimator=est, proba=proba, train=train, test=test)
+                p1_task = client.create_task(type='fit_predict', data=task.data,
+                                             description=task.description + ', phase 1, fold %d, estimator %d' % (
+                                                 fold, n),
+                                             result='pred', estimator=est, proba=proba, train=train, test=test)
                 client.task_dependencies[task.id].deps.append(p1_task.id)
                 client.task_dependencies[task.id].descr.append('p1_f%d_e%d' % (fold, n))
                 tasks.append(p1_task)
 
         for n, est in enumerate(estimators):
-            p2_task = client.create_task(type='fit_predict', result='pred', data=task.data, test_data=test_data,
+            p2_task = client.create_task(type='fit_predict', data=task.data,
+                                         description=task.description + ', phase 2,  estimator %d' % n,
+                                         test_data=test_data, result='pred',
                                          estimator=est, proba=proba)
             client.task_dependencies[task.id].deps.append(p2_task.id)
             client.task_dependencies[task.id].descr.append('p2_e%d' % n)
@@ -204,22 +234,61 @@ class Master:
         map(self.work_queue.queue.append, tasks)
         return task.id
 
+    def _check_data(self, data):
+        if isinstance(data, str) and data not in self.datasets:
+            raise AttributeError('Unknown dataset')
+
     def client_put_task(self, task):
-        if task.owner in self.clients:
-            client = self.clients[task.owner]
-            with client.lock:
-                try:
-                    client.add_task(task)
-                    if task.type == 'cv':
-                        return self._cv_task(task)
-                    elif task.type == 'stacking':
-                        return self._stacking_task(task)
-                    else:
-                        self.work_queue.queue.append(task)
-                        return task.id
-                except Exception:
-                    logger.error('Error:', exc_info=True)
-                    raise
+        try:
+            if task.owner in self.clients:
+                self._check_data(task.data)
+                if 'test_data' in task.params:
+                    self._check_data(task['test_data'])
+
+                client = self.clients[task.owner]
+                with client.lock:
+                    try:
+                        client.add_task(task)
+                        if task.type == 'cv':
+                            return self._cv_task(task)
+                        elif task.type == 'stacking':
+                            return self._stacking_task(task)
+                        else:
+                            self.work_queue.queue.append(task)
+                            return task.id
+                    except Exception:
+                        logger.error('Error:', exc_info=True)
+                        raise
+
+            else:
+                raise AttributeError('Unknown client')
+        except:
+            logger.error('client put task', exc_info=True)
+            raise
+
+    def client_list_tasks(self, client_id, auto=False, failed=None, completed=None, canceled=None):
+        client = self.clients[client_id]
+        tasks = client.tasks.values()
+        if auto is not None:
+            tasks = filter(lambda t: t.auto == auto, tasks)
+        if failed is not None:
+            tasks = filter(lambda t: t.failed == failed, tasks)
+        if completed is not None:
+            tasks = filter(lambda t: t.done == completed, tasks)
+        if canceled is not None:
+            tasks = filter(lambda t: t.canceled == completed, tasks)
+        return ['%d "%s" user %d, failed %d, completed %d, canceled %d' % (
+            t.id, t.description, not t.auto, t.failed, t.done, t.canceled) for t in tasks]
+
+    def client_get_task(self, client_id, task_id):
+        return self.clients[client_id].tasks[task_id]
+
+    def client_cancel_task(self, client_id, task_id):
+        client = self.clients[client_id]
+        client.tasks[task_id].canceled = True
+        if task_id in client.task_dependencies:
+            for t in client.task_dependencies[task_id].deps:
+                client.tasks[t].canceled = True
 
     def client_put_data(self, name, data):
         logger.info('Got data "%s"' % name)
@@ -257,7 +326,7 @@ class Master:
                 return None
             time.sleep(.2)
         res = self.clients[client_id].results[task_id]
-        #del self.clients[client_id].results[task_id]
+        # del self.clients[client_id].results[task_id]
         return res
 
 
@@ -285,8 +354,12 @@ class Client:
             self.next_task_id += 1
             return self.next_task_id - 1
 
-    def create_task(self, type, data, **kwargs):
-        task = dl_utils.Task(type, data, **kwargs)
+    def create_task(self, type, data, description, **kwargs):
+        """
+
+        :rtype: Task
+        """
+        task = dl_utils.Task(type, data, description, True, **kwargs)
         task.owner = self.id
         task.id = self.get_task_id()
         self.tasks[task.id] = task
@@ -324,10 +397,17 @@ def main():
     parser.add_argument('--host', help='Master host', default='0.0.0.0')
     parser.add_argument('-p', '--port', help='Master port', default=5555, type=int)
     parser.add_argument('-v', '--verbosity', help='0=DEBUG 1=INFO 2=WARN 3=ERROR', default=1, type=int)
+    parser.add_argument('-w', '--worker', help='Also run a worker', action='store_true')
     args = parser.parse_args()
     levels = {0: logging.DEBUG, 1: logging.INFO, 2: logging.WARN, 3: logging.ERROR}
     logger.setLevel(levels[args.verbosity])
+    if args.worker:
+        from worker import run_worker
+        t = Thread(target=run_worker, args=('local_worker', 'localhost', args.port))
+        t.setDaemon(True)
+        t.start()
     start_master(args.host, args.port)
+    print('master stopped')
 
 
 if __name__ == '__main__':
